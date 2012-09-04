@@ -15,9 +15,12 @@ use nss::pk11pub;
 use nss::pkcs11t;
 use nss::secmodt;
 
-use std::net::url;
+use mod std::net::url;
+use std::base64::ToBase64;
 use std::net::url::Url;
 use std::sort::Sort;
+
+use mod dvec;
 use dvec::DVec;
 use from_str::from_str;
 use send_map::SendMap;
@@ -50,63 +53,6 @@ impl SignatureMethod : ToStr {
     }
 }
 
-impl SignatureMethod {
-    fn sign(self, request: &Request, consumer: &Consumer, token: Option<&Token>) -> ~str {
-        let signature = [
-            url::encode(request.method),
-            url::encode(request.normalized_url()),
-            url::encode(request.normalized_parameters())
-        ];
-
-        let mut key = url::encode(consumer.secret) + "&";
-        match token {
-            None => {}
-            Some(token) => key += url::encode(token.secret)
-        }
-
-        let raw = str::connect(signature, "&");
-
-        match self {
-            HmacSha1 => return self.sign_hmac_sha1(key, raw)
-        }
-    }
-
-    fn sign_hmac_sha1(self, key: &str, raw: &str) -> ~str {
-
-        //
-        // Call directly to NSS to perform the signing operation.
-        //
-        // This is basically writing C in Rust, so it's rather ugly. I could have written higher-
-        // level APIs, but I don't trust myself not to make disastrous-from-a-security-perspective
-        // design mistakes.
-        //
-
-        // FIXME: What happens on double initialization?
-        // FIXME: I sure hope this is threadsafe...
-        nss::init_nodb(".").get();
-
-        let mechanism = pkcs11t::CKM_SHA_1_HMAC;
-        let key_item = Item { sec_type: siBuffer, data: str::as_bytes_slice(key) };
-        let slot = pk11pub::SlotInfo::best(mechanism);
-        let operation = pkcs11t::CKA_SIGN;
-        let sym_key = slot.import_sym_key(mechanism, secmodt::PK11_OriginUnwrap, operation,
-                                          &key_item);
-        let mut dest_item = Item { sec_type: siBuffer, data: &[] };
-        let context = pk11pub::Context::new_with_sym_key(mechanism, operation, &sym_key,
-                                                         &mut dest_item);
-        context.digest_begin();
-        context.digest_op(str::as_bytes_slice(raw));
-        let bytes = context.digest_final().get();
-
-        // FIXME: Move to stdlib.
-        let mut s = ~"";
-        for bytes.each |b| {
-            s += uint::to_str(b as uint, 16);
-        }
-        return s;
-    }
-}
-
 /**
  * OAuth requests.
  */
@@ -114,7 +60,7 @@ impl SignatureMethod {
 struct Request {
     method: &str,
     url: &Url,
-    parameters: &mut LinearMap<~str,~str>
+    parameters: &LinearMap<~str,~str>
 }
 
 impl Request {
@@ -143,23 +89,76 @@ impl Request {
 
     // Returns a string that contains the parameters that must be signed.
     fn normalized_parameters(&self) -> ~str {
-        let items = vec::to_mut(self.url.query.filter(|pair| pair.first() != ~"oauth_signature"));
+        let items = DVec();
+        for self.url.query.each |pair| {
+            // FIXME: Causes LLVM assertion: let (ref key, ref value) = pair;
+            if pair.first() != ~"oauth_signature" {
+                items.push(copy pair);
+            }
+        }
+
+        for self.parameters.each_ref |key, value| {
+            if *key != ~"oauth_signature" {
+                items.push((copy *key, copy *value));
+            }
+        }
+
+        let items = dvec::unwrap(items);
         items.qsort();
         return url::query_to_str(vec::from_mut(items));
     }
 
-    fn sign(&self, method: SignatureMethod, consumer: &Consumer, token: Option<&Token>) {
-        if !self.parameters.contains_key(&~"oauth_consumer_key") {
-            self.parameters.insert(~"oauth_consumer_key", consumer.key.to_str());
-        }
+    fn sign(&self, method: SignatureMethod, consumer: &Consumer, token: Option<&Token>) -> ~str {
+        let signature = [
+            url::encode_component(self.method),
+            url::encode_component(self.normalized_url()),
+            url::encode_component(self.normalized_parameters())
+        ];
+
+        let mut key = url::encode_component(consumer.secret) + "&";
         match token {
-            Some(token) if !self.parameters.contains_key(&~"oauth_token") => {
-                self.parameters.insert(~"oauth_token", token.key.to_str());
-            }
-            Some(_) | None => {}
+            None => {}
+            Some(token) => key += url::encode_component(token.secret)
         }
-        self.parameters.insert(~"oauth_signature_method", method.to_str());
-        self.parameters.insert(~"oauth_signature", method.sign(self, consumer, token));
+        debug!("key text: %?", key);
+
+        let raw = str::connect(signature, "&");
+        debug!("raw text: %?", raw);
+
+        let bytes;
+        match method {
+            HmacSha1 => bytes = self.sign_hmac_sha1(key, raw)
+        }
+
+        return bytes.to_base64();
+    }
+
+    fn sign_hmac_sha1(&self, key: &str, raw: &str) -> ~[u8] {
+
+        //
+        // Call directly to NSS to perform the signing operation.
+        //
+        // This is basically writing C in Rust, so it's rather ugly. I could have written higher-
+        // level APIs, but I don't trust myself not to make disastrous-from-a-security-perspective
+        // design mistakes.
+        //
+
+        // FIXME: What happens on double initialization?
+        // FIXME: I sure hope this is threadsafe...
+        nss::init_nodb(".").get();
+
+        let mechanism = pkcs11t::CKM_SHA_1_HMAC;
+        let key_item = Item { sec_type: siBuffer, data: str::as_bytes_slice(key) };
+        let slot = pk11pub::SlotInfo::best(mechanism);
+        let operation = pkcs11t::CKA_SIGN;
+        let sym_key = slot.import_sym_key(mechanism, secmodt::PK11_OriginUnwrap, operation,
+                                          &key_item);
+        let mut dest_item = Item { sec_type: siBuffer, data: &[] };
+        let context = pk11pub::Context::new_with_sym_key(mechanism, operation, &sym_key,
+                                                         &mut dest_item);
+        context.digest_begin();
+        context.digest_op(str::as_bytes_slice(raw));
+        return result::unwrap(context.digest_final());
     }
 }
 
@@ -173,21 +172,23 @@ fn main() {
     (&mut params).insert(~"oauth_timestamp", ~"5678");
     (&mut params).insert(~"user", ~"joestump");
     (&mut params).insert(~"photoid", ~"555555555555");
+    (&mut params).insert(~"oauth_consumer_key", consumer.key.to_str());
+    (&mut params).insert(~"oauth_token", token.key.to_str());
+    (&mut params).insert(~"oauth_signature_method", HmacSha1.to_str());
 
     let url = option::unwrap(from_str("http://example.com/photos"));
 
-    // We need this block to ensure that "request" gets destroyed before we iterate over the
-    // map; otherwise it's unsafe.
-
-    {
+    let signature = {
         let request = Request {
             method: "GET",
             url: &url,
-            parameters: &mut params
+            parameters: &params
         };
 
-        request.sign(HmacSha1, &consumer, Some(&token));
-    }
+        request.sign(HmacSha1, &consumer, Some(&token))
+    };
+
+    (&mut params).insert(~"oauth_signature", signature);
 
     // FIXME: If you say params.each_ref here it segfaults!
     for (&params).each_ref |key, value| {
