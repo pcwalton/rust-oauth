@@ -12,8 +12,8 @@ extern mod std;
 
 use nss::common::{Item, siBuffer};
 use nss::pk11pub;
-use nss::pkcs11t;
-use nss::secmodt;
+use nss::pkcs11t::{CKA_SIGN, CKM_SHA_1_HMAC};
+use nss::secmodt::PK11_OriginUnwrap;
 
 use mod std::net::url;
 use std::base64::ToBase64;
@@ -134,25 +134,21 @@ impl Request {
     }
 
     fn sign_hmac_sha1(&self, key: &str, raw: &str) -> ~[u8] {
-
-        //
         // Call directly to NSS to perform the signing operation.
         //
         // This is basically writing C in Rust, so it's rather ugly. I could have written higher-
         // level APIs, but I don't trust myself not to make disastrous-from-a-security-perspective
         // design mistakes.
-        //
 
         // FIXME: What happens on double initialization?
         // FIXME: I sure hope this is threadsafe...
         nss::init_nodb(".").get();
 
-        let mechanism = pkcs11t::CKM_SHA_1_HMAC;
+        let mechanism = CKM_SHA_1_HMAC;
         let key_item = Item { sec_type: siBuffer, data: str::as_bytes_slice(key) };
         let slot = pk11pub::SlotInfo::best(mechanism);
-        let operation = pkcs11t::CKA_SIGN;
-        let sym_key = slot.import_sym_key(mechanism, secmodt::PK11_OriginUnwrap, operation,
-                                          &key_item);
+        let operation = CKA_SIGN;
+        let sym_key = slot.import_sym_key(mechanism, PK11_OriginUnwrap, operation, &key_item);
         let mut dest_item = Item { sec_type: siBuffer, data: &[] };
         let context = pk11pub::Context::new_with_sym_key(mechanism, operation, &sym_key,
                                                          &mut dest_item);
@@ -166,7 +162,7 @@ fn main() {
     let token = Token { key: "tok-test-key", secret: "tok-test-secret" };
     let consumer = Consumer { key: "con-test-key", secret: "con-test-secret" };
 
-    let mut params = send_map::linear::LinearMap();
+    let mut params = LinearMap();
     (&mut params).insert(~"oauth_version", ~"1.0");
     (&mut params).insert(~"oauth_nonce", ~"1234");
     (&mut params).insert(~"oauth_timestamp", ~"5678");
