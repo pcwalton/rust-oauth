@@ -82,7 +82,7 @@ impl Request {
         }
 
         // FIXME: Combining these two statements into one causes a segfault.
-        let url = url::url(copy url.scheme, None, copy url.host, opt_port, copy url.path, ~[],
+        let url = url::Url(copy url.scheme, None, copy url.host, opt_port, copy url.path, ~[],
                            None);
         return url.to_str();
     }
@@ -103,9 +103,9 @@ impl Request {
             }
         }
 
-        let items = dvec::unwrap(items);
+        let mut items = dvec::unwrap(items);
         items.qsort();
-        return url::query_to_str(vec::from_mut(items));
+        return url::query_to_str(items);
     }
 
     fn sign(&self, method: SignatureMethod, consumer: &Consumer, token: Option<&Token>) -> ~str {
